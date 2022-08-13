@@ -1,0 +1,42 @@
+version: "3.9"
+services:
+  app:
+    container_name: "inline-sticker-app"
+    restart: always
+    build: .
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      PG_HOST: 'postgres'
+      PG_USER: 'stick'
+      PG_PASS: '<POSTGRES PASSWORD>'
+      PG_DBNAME: 'stickerdb'
+      R_ADDR: 'redis:6379'
+      R_PASS: '<REDIS PASSWORD>'
+      TG_TOKEN: '<TELEGRAM BOT TOKEN>'
+  redis:
+    image: "redis:alpine"
+    restart: always
+    ports:
+      - '6379:6379'
+    command: ["redis-server", "--requirepass", "<REDIS PASSWORD>"]
+    volumes:
+      - redis:/data
+  postgres:
+    image: "postgres:alpine"
+    restart: always
+    environment:
+      POSTGRES_USER: 'stick'
+      POSTGRES_PASSWORD: '<POSTGRES PASSWORD>'
+      POSTGRES_DB: 'stickerdb'
+    ports:
+      - '5432:5432'
+    volumes: 
+      - postgres:/data
+
+volumes:
+  redis:
+    driver: local
+  postgres:
+    driver: local
