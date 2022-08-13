@@ -85,7 +85,7 @@ func InsertStickerPG(userID int64, stickerID string, stickerUniqueID string, des
 	q := `INSERT INTO stickers (user_id, sticker_id, sticker_unique_id, description)
 	VALUES ($1, $2, $3, $4)
 	ON CONFLICT(user_id, sticker_unique_id)
-    DO UPDATE SET description = $4`
+	DO UPDATE SET description = $4`
 
 	if _, err = db.Exec(q, userID, stickerID, stickerUniqueID, description); err != nil {
 		return err

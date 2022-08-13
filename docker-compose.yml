@@ -32,7 +32,7 @@ services:
       POSTGRES_DB: 'stickerdb'
     ports:
       - '5432:5432'
-    volumes: 
+    volumes:
       - postgres:/data
 
 volumes:

@@ -16,29 +16,29 @@ func messageHandler(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
 
 	switch upd.Message.Command() {
 	case "start":
-		processSrartoperation(bot, upd)
+		ProcessSrartOperation(bot, upd)
 		return
 	case "help":
-		processHelpOperation(bot, upd)
+		ProcessHelpOperation(bot, upd)
 		return
 	case "cancel":
-		processCancelOpearation(bot, upd, redis)
+		ProcessCancelOpearation(bot, upd, redis)
 		return
 	}
 
 	if redis.State == Def {
 		switch upd.Message.Command() {
 		case "add":
-			go initAddingSticker(bot, upd, redis)
+			go InitAddingSticker(bot, upd, redis)
 		case "delete":
-			go initDeletingSticker(bot, upd, redis)
+			go InitDeletingSticker(bot, upd, redis)
 		case "show":
-			go initShowDescription(bot, upd, redis)
+			go InitShowDescription(bot, upd, redis)
 		default:
-			go processUnrecognizedCommand(bot, upd)
+			go ProcessUnrecognizedCommand(bot, upd)
 		}
 	} else {
-		go processFSM(bot, upd, redis)
+		go ProcessFSM(bot, upd, redis)
 	}
 }
 

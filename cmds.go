@@ -9,29 +9,29 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-func processSrartoperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
+func ProcessSrartOperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
 	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
 	msg.Text = "Hi! I can save stickers for further inline use. Type /help for info."
 	bot.Send(msg)
 }
 
-func processUnrecognizedCommand(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
+func ProcessUnrecognizedCommand(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
 	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
 	msg.Text = "Unrecognized command. Type /help for info."
 	bot.Send(msg)
 }
 
-func processHelpOperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
+func ProcessHelpOperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
 	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
 	msg.Text = "You can control me by sending these commands:\n" +
 		"/add	 - to add a new sticker or change the old one.\n" +
 		"/delete - to delete the sticker.\n" +
 		"/show	 - to show the description of the saved sticker.\n" +
-		"/cancel - to cancel current opeartion."
+		"/cancel - to cancel current operation."
 	bot.Send(msg)
 }
 
-func processCancelOpearation(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
+func ProcessCancelOpearation(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
 	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
 	switch redis.State {
 	case Def:
@@ -60,25 +60,25 @@ func processCancelOpearation(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *ui
 	bot.Send(msg)
 }
 
-func initAddingSticker(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
+func InitAddingSticker(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
 	redis.State = Def
 	redis.Event = addSticker
-	processFSM(bot, upd, redis)
+	ProcessFSM(bot, upd, redis)
 }
 
-func initDeletingSticker(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
+func InitDeletingSticker(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
 	redis.State = Def
 	redis.Event = deleteSticker
-	processFSM(bot, upd, redis)
+	ProcessFSM(bot, upd, redis)
 }
 
-func initShowDescription(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
+func InitShowDescription(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
 	redis.State = Def
 	redis.Event = showDescription
-	processFSM(bot, upd, redis)
+	ProcessFSM(bot, upd, redis)
 }
 
-func processFSM(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
+func ProcessFSM(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
 	stickerFSM := processStickerFSM(redis.State)
 	addingCtx := &ProcessingStickerContext{
 		bot:   bot,
