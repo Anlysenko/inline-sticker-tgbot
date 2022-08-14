@@ -11,14 +11,23 @@ import (
 
 func ProcessSrartOperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
 	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
-	msg.Text = "Hi! I can save stickers for further inline use. Type /help for info."
+	msg.Text = "Hi! I can save stickers for further inline use.\n" +
+		"Start adding a sticker by the /add command " +
+		"or just send it to me.\n" +
+		"Type /help for info."
 	bot.Send(msg)
 }
 
-func ProcessUnrecognizedCommand(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
-	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
-	msg.Text = "Unrecognized command. Type /help for info."
-	bot.Send(msg)
+func ProcessUnrecognizedCommand(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
+	if upd.Message.Sticker == nil {
+		msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
+		msg.Text = "Unrecognized command. Type /help for info."
+		bot.Send(msg)
+		return
+	}
+	redis.State = addingSticker
+	redis.Event = sendToAddSticker
+	ProcessFSM(bot, upd, redis)
 }
 
 func ProcessHelpOperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {

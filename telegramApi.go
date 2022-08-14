@@ -35,7 +35,7 @@ func messageHandler(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
 		case "show":
 			go InitShowDescription(bot, upd, redis)
 		default:
-			go ProcessUnrecognizedCommand(bot, upd)
+			go ProcessUnrecognizedCommand(bot, upd, redis)
 		}
 	} else {
 		go ProcessFSM(bot, upd, redis)
