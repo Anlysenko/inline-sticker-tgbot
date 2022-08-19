@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	_ "github.com/lib/pq"
 )
@@ -93,22 +94,34 @@ func InsertStickerPG(userID int64, stickerID string, stickerUniqueID string, des
 	return nil
 }
 
-func GetStickerPG(userID int64, searchQuery string, queryOffset int) ([]stickers, error) {
-	if searchQuery == "" {
-		return nil, nil
+func GetStickerPG(userID int64, query string, queryOffset int) ([]stickers, error) {
+	var q string
+	switch {
+	case query == "":
+		q = `SELECT sticker_id from stickers
+		WHERE user_id = $1 OFFSET $2 LIMIT 50`
+		return processQueryStickersPG(q, userID, queryOffset)
+	case strings.HasPrefix(query, "//"):
+		q = `SELECT sticker_id from stickers
+		WHERE description LIKE '%' || $1 || '%'
+		OFFSET $2 LIMIT 50`
+		return processQueryStickersPG(q, query[2:], queryOffset)
+	default:
+		q = `SELECT sticker_id from stickers
+		WHERE user_id = $1 AND description LIKE '%' || $2 || '%'
+		OFFSET $3 LIMIT 50`
+		return processQueryStickersPG(q, userID, query, queryOffset)
 	}
+}
 
+func processQueryStickersPG(q string, args ...any) ([]stickers, error) {
 	db, err := sql.Open("postgres", dbInfo)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 
-	q := `SELECT sticker_id from stickers 
-	WHERE user_id = $1 AND description LIKE '%' || $2 || '%'
-	OFFSET $3 LIMIT 50`
-
-	rows, err := db.Query(q, userID, searchQuery, queryOffset)
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
