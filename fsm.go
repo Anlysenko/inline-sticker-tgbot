@@ -6,152 +6,135 @@ import (
 	"sync"
 )
 
-const (
-	Def = StateType("")
-	Nop = EventType("nop")
-)
-
 type StateType string
 type EventType string
 
 type EventContext any
+
 type Actions interface {
 	Execute(eventCtx EventContext) EventType
 }
 
-type State struct {
-	Action Actions
-	Event  Events
-}
-
-type States map[StateType]State
+type States map[StateType]EventObj
 type Events map[EventType]StateType
 
+type EventObj struct {
+	action Actions
+	event  Events
+}
+
 type StateMachine struct {
-	Previous StateType
-	Current  StateType
-	States   States
+	currentState StateType
+	currentEvent EventType
+	states       States
 
 	mu sync.Mutex
 }
 
 func (s *StateMachine) getNextState(event EventType) (StateType, error) {
-	state, ok := s.States[s.Current]
+	state, ok := s.states[s.currentState]
 	if !ok {
-		return Def, errors.New("missing state")
+		return def, errors.New("missing state")
 	}
 
-	next, ok := state.Event[event]
+	next, ok := state.event[event]
 	if !ok {
-		return Def, errors.New("missing event")
+		return def, errors.New("missing event")
 	}
 
 	return next, nil
 }
 
-func (s *StateMachine) SendEvent(event EventType, eventCtx EventContext) (StateType, EventType, error) {
+func (s *StateMachine) SendEvent(event EventType, eventCtx EventContext) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	nextState, err := s.getNextState(event)
 	if err != nil {
-		return Def, Nop, fmt.Errorf("can't get next state via SendEvent: %w", err)
+		return fmt.Errorf("can't get next state via SendEvent: %w", err)
 	}
 
-	state, ok := s.States[nextState]
-	if !ok || state.Action == nil {
-		return Def, Nop, errors.New("configuration error")
+	state, ok := s.states[nextState]
+	if !ok || state.action == nil {
+		return errors.New("configuration error")
 	}
 
-	s.Previous = s.Current
-	s.Current = nextState
+	s.currentEvent = state.action.Execute(eventCtx)
+	s.currentState = nextState
 
-	nextEvent := state.Action.Execute(eventCtx)
-	if nextEvent == Nop {
-		return Def, Nop, nil
-	}
-
-	return s.Current, nextEvent, nil
+	return nil
 }
 
+// States
 const (
-	addingSticker            = StateType("addingSticker")
-	sendingToAddSticker      = StateType("sendingToAddSticker")
-	sendingToAddDescription  = StateType("sendingToAddDescription")
-	deletingSticker          = StateType("deletingSticker")
-	sendingToDeleteSticker   = StateType("sendingToDeleteSticker")
-	showingDescription       = StateType("showingDescription")
-	sendingToShowDescription = StateType("sendingToShowDescription")
+	def = StateType("def")
 
-	addSticker            = EventType("addSticker")
-	sendToAddSticker      = EventType("sendToAddSticker")
-	sendToAddDescription  = EventType("sendToAddDescription")
-	deleteSticker         = EventType("deleteSticker")
-	sendToDeleteSticker   = EventType("sendToDeleteSticker")
-	showDescription       = EventType("showDescription")
-	sendToShowDescription = EventType("sendToShowDescription")
+	addingStickerState = StateType("addingSticker")
+	addingTagsState    = StateType("addingTags")
+
+	showingTagsState = StateType("showingTags")
+
+	deletingStickerState = StateType("deletingSticker")
 )
 
-func processStickerFSM(current StateType) *StateMachine {
+// Events
+const (
+	nop = EventType("nop")
+
+	addStickerEvent = EventType("addSticker")
+	addTagsEvent    = EventType("addTags")
+
+	showTagsEvent = EventType("showTags")
+
+	deleteStickerEvent = EventType("deleteSticker")
+)
+
+func newStickerFSM() *StateMachine {
 	return &StateMachine{
-		States: States{
-			Def: State{
-				Event: Events{
-					addSticker:      addingSticker,
-					deleteSticker:   deletingSticker,
-					showDescription: showingDescription,
+		states: States{
+			def: EventObj{
+				action: &defaultStickerAction{},
+				event: Events{
+					nop:                def,
+					addStickerEvent:    addingStickerState,
+					showTagsEvent:      showingTagsState,
+					deleteStickerEvent: deletingStickerState,
+					addTagsEvent:       addingTagsState,
 				},
 			},
 
-			addingSticker: State{
-				Action: &addingStickerAction{},
-				Event: Events{
-					sendToAddSticker: sendingToAddSticker,
+			addingStickerState: EventObj{
+				action: &addingStickerAction{},
+				event: Events{
+					addStickerEvent: addingStickerState,
+					addTagsEvent:    addingTagsState,
+					nop:             def,
 				},
 			},
-			sendingToAddSticker: State{
-				Action: &sendingStickerAction{},
-				Event: Events{
-					sendToAddSticker:     sendingToAddSticker,
-					sendToAddDescription: sendingToAddDescription,
-				},
-			},
-			sendingToAddDescription: State{
-				Action: &sendingDescriptionAction{},
-				Event: Events{
-					sendToAddDescription: sendingToAddDescription,
-					Nop:                  Def,
+			addingTagsState: EventObj{
+				action: &addingTagsAction{},
+				event: Events{
+					addTagsEvent: addingTagsState,
+					nop:          def,
 				},
 			},
 
-			deletingSticker: State{
-				Action: &deletingStickerAction{},
-				Event: Events{
-					sendToDeleteSticker: sendingToDeleteSticker,
-				},
-			},
-			sendingToDeleteSticker: State{
-				Action: &sendingToDeleteStickerAction{},
-				Event: Events{
-					sendToDeleteSticker: sendingToDeleteSticker,
-					Nop:                 Def,
+			showingTagsState: EventObj{
+				action: &showingTagsAction{},
+				event: Events{
+					showTagsEvent: showingTagsState,
+					nop:           def,
 				},
 			},
 
-			showingDescription: State{
-				Action: &showingDescriptionAction{},
-				Event: Events{
-					sendToShowDescription: sendingToShowDescription,
-				},
-			},
-			sendingToShowDescription: State{
-				Action: &sendingToShowDescriptionAction{},
-				Event: Events{
-					sendToShowDescription: sendingToShowDescription,
-					Nop:                   Def,
+			deletingStickerState: EventObj{
+				action: &deletingStickerAction{},
+				event: Events{
+					deleteStickerEvent: deletingStickerState,
+					nop:                def,
 				},
 			},
 		},
-		Current: current,
+		currentState: def,
 	}
 }

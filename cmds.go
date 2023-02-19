@@ -1,283 +1,168 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"log"
 	"strings"
 	"unicode"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-func ProcessSrartOperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
-	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
-	msg.Text = "Hi! I can save stickers for further inline use.\n" +
-		"Start adding a sticker by the /add command " +
-		"or just send it to me.\n" +
-		"Type /help for info."
-	bot.Send(msg)
+type ActionContext struct {
+	tgModel    *TelegramModel
+	sticker    StickerModel
+	user       UserModel
+	memSticker *MemSticker
 }
 
-func ProcessUnrecognizedCommand(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
-	if upd.Message.Sticker == nil {
-		msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
-		msg.Text = "Unrecognized command. Type /help for info."
-		bot.Send(msg)
-		return
-	}
-	redis.State = addingSticker
-	redis.Event = sendToAddSticker
-	ProcessFSM(bot, upd, redis)
-}
+type defaultStickerAction struct{}
 
-func ProcessHelpOperation(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
-	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
-	msg.Text = "You can control me by sending these commands:\n" +
-		"/add	 - to add a new sticker or change the old one.\n" +
-		"/delete - to delete the sticker.\n" +
-		"/show	 - to show the description of the saved sticker.\n" +
-		"/cancel - to cancel current operation."
-	bot.Send(msg)
-}
+func (a *defaultStickerAction) Execute(eventCtx EventContext) EventType {
+	ctx := eventCtx.(*ActionContext)
 
-func ProcessCancelOpearation(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
-	msg := tgbotapi.NewMessage(upd.Message.Chat.ID, "")
-	switch redis.State {
-	case Def:
-		msg.Text = "I wasn't doing anything."
-	case addingSticker:
-		msg.Text = "Sending sticker operation has been canceled."
-	case sendingToAddSticker, sendingToAddDescription:
-		msg.Text = "Sending sticker description operation has been canceled."
-		err := DeleteStickerPG(upd.Message.From.ID, "~")
-		if err != nil {
-			log.Println("[Delete sticker postgres] ERROR:", err)
-		}
-	case deletingSticker, sendingToDeleteSticker:
-		msg.Text = "Deleting sticker operation has been canceled."
-	case showingDescription, sendingToShowDescription:
-		msg.Text = "Showing sticker description has been canceled."
+	sticker := ctx.tgModel.upd.Message.Sticker
+	userID := ctx.tgModel.upd.Message.From.ID
+	if sticker != nil {
+		ctx.memSticker.addSticker(userID, sticker)
+		ctx.tgModel.addingStickerResponse()
+		return addTagsEvent
 	}
 
-	redis.State = Def
-	redis.Event = Nop
-	err := UpdateDataRedis(upd.Message.From.UserName, upd.Message.Chat.ID, redis)
-	if err != nil {
-		log.Println("[Update state redis] ERROR:", err)
+	requestedCommand := ctx.tgModel.upd.Message.Command()
+	ctx.tgModel.defaultStateResponse(requestedCommand)
+
+	switch requestedCommand {
+	case "add":
+		return addStickerEvent
+	case "show":
+		return showTagsEvent
+	case "delete":
+		return deleteStickerEvent
+	default:
+		return nop
 	}
-
-	bot.Send(msg)
-}
-
-func InitAddingSticker(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
-	redis.State = Def
-	redis.Event = addSticker
-	ProcessFSM(bot, upd, redis)
-}
-
-func InitDeletingSticker(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
-	redis.State = Def
-	redis.Event = deleteSticker
-	ProcessFSM(bot, upd, redis)
-}
-
-func InitShowDescription(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
-	redis.State = Def
-	redis.Event = showDescription
-	ProcessFSM(bot, upd, redis)
-}
-
-func ProcessFSM(bot tgbotapi.BotAPI, upd tgbotapi.Update, redis *uidChidRedis) {
-	stickerFSM := processStickerFSM(redis.State)
-	addingCtx := &ProcessingStickerContext{
-		bot:   bot,
-		upd:   upd,
-		redis: redis,
-	}
-
-	state, event, err := stickerFSM.SendEvent(redis.Event, addingCtx)
-	if err != nil {
-		log.Println("[FSM] ERROR:", err)
-	}
-
-	redis = &uidChidRedis{Event: event, State: state}
-	err = UpdateDataRedis(upd.Message.From.UserName, upd.Message.Chat.ID, redis)
-	if err != nil {
-		log.Println("[Update state redis] ERROR:", err)
-	}
-}
-
-type ProcessingStickerContext struct {
-	bot   tgbotapi.BotAPI
-	upd   tgbotapi.Update
-	redis *uidChidRedis
 }
 
 type addingStickerAction struct{}
 
 func (a *addingStickerAction) Execute(eventCtx EventContext) EventType {
-	ctx := eventCtx.(*ProcessingStickerContext)
+	ctx := eventCtx.(*ActionContext)
 
-	msg := tgbotapi.NewMessage(ctx.upd.Message.Chat.ID, "Send me the sticker you want to add.")
-	ctx.bot.Send(msg)
-
-	return sendToAddSticker
-}
-
-type sendingStickerAction struct{}
-
-func (a *sendingStickerAction) Execute(eventCtx EventContext) EventType {
-	ctx := eventCtx.(*ProcessingStickerContext)
-	userID := ctx.upd.Message.From.ID
-	sticker := ctx.upd.Message.Sticker
-
-	msg := tgbotapi.NewMessage(ctx.upd.Message.Chat.ID, "")
+	sticker := ctx.tgModel.upd.Message.Sticker
+	userID := ctx.tgModel.upd.Message.From.ID
 
 	if sticker == nil {
-		msg.Text = "Maaan... This is not a sticker. Try again or /cancel"
-		ctx.bot.Send(msg)
-		return sendToAddSticker
+		ctx.tgModel.notStickerResponse()
+		return addStickerEvent
 	}
 
-	msg.Text = "Great! Now send me a brief description within 4 words."
-	if err := InsertStickerPG(userID, sticker.FileID, sticker.FileUniqueID, "~"); err != nil {
-		log.Println("[Insert sticker postgres] ERROR:", err)
-		msg.Text = "Sorry, I can't save your sticker. Probably it's DB problem. /cancel"
-		ctx.bot.Send(msg)
-		return Nop
-	}
-
-	ctx.bot.Send(msg)
-	return sendToAddDescription
+	ctx.memSticker.addSticker(userID, sticker)
+	ctx.tgModel.addingStickerResponse()
+	return addTagsEvent
 }
 
-type sendingDescriptionAction struct{}
+type addingTagsAction struct{}
 
-func (a *sendingDescriptionAction) Execute(eventCtx EventContext) EventType {
-	ctx := eventCtx.(*ProcessingStickerContext)
-	userID := ctx.upd.Message.From.ID
-	desc := ctx.upd.Message
+func (a *addingTagsAction) Execute(eventCtx EventContext) EventType {
+	ctx := eventCtx.(*ActionContext)
 
-	msg := tgbotapi.NewMessage(desc.Chat.ID, "")
+	userID := ctx.tgModel.upd.Message.From.ID
+	tags := ctx.tgModel.upd.Message.Text
 
-	if !isDescriptionAvailable(desc.Text) {
-		msg.Text = "This description is not available.\n" +
-			"You can write from 1 to 4 words separated by spaces. " +
-			"Use only letters, numbers, dashes and spaces.\n" +
-			"Try again or /cancel"
-		ctx.bot.Send(msg)
-		return sendToAddDescription
+	if !a.isTagsAvailable(tags) {
+		ctx.tgModel.addingTagsResponse("invalid_tags")
+		return addTagsEvent
 	}
 
-	msg.Text = "Nice! Sticker has been added."
-	if err := UpdateDescriptionPG(userID, desc.Text); err != nil {
-		log.Println("[Update description postgres] ERROR:", err)
-		msg.Text = "Sorry, I can't save your sticker. Probably it's DB problem. /cancel"
-		ctx.bot.Send(msg)
-		return Nop
+	if err := ctx.memSticker.updateSticker(userID, tags); err != nil {
+		ctx.tgModel.addingTagsResponse("update_error")
+		return nop
 	}
 
-	ctx.bot.Send(msg)
-	return Nop
+	if err := ctx.sticker.InsertSticker(ctx.memSticker.userStickersMap[userID].sticker); err != nil {
+		log.Println("[Update tags postgres] ERROR:", err)
+		ctx.tgModel.databaseErrorResponse()
+		return addTagsEvent
+	}
+
+	ctx.tgModel.addingTagsResponse("success")
+	return nop
 }
 
-func isDescriptionAvailable(txt string) bool {
-	if len(txt) < 2 {
+func (a *addingTagsAction) isTagsAvailable(input string) bool {
+	if len(input) > 100 {
 		return false
 	}
-	f := func(c rune) bool {
-		isSpace := c == rune(' ')
-		isHyphen := c == rune('-')
-		return !unicode.IsLetter(c) && !unicode.IsNumber(c) && !isSpace && !isHyphen
+
+	words := strings.Fields(input)
+	if len(words) < 1 || len(words) > 4 {
+		return false
 	}
-	for _, r := range txt {
-		if f(r) {
-			return false
+
+	for _, word := range words {
+		for _, r := range word {
+			if !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type showingTagsAction struct{}
+
+func (a *showingTagsAction) Execute(eventCtx EventContext) EventType {
+	ctx := eventCtx.(*ActionContext)
+
+	userID := ctx.tgModel.upd.Message.From.ID
+	sticker := ctx.tgModel.upd.Message.Sticker
+
+	if sticker == nil {
+		ctx.tgModel.notStickerResponse()
+		return showTagsEvent
+	}
+
+	tags, err := ctx.sticker.GetStickerTags(userID, sticker.FileUniqueID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrRecordNotFound):
+			ctx.tgModel.notFoundResponse()
+			return showTagsEvent
+		default:
+			log.Println("[Show tags postgres] ERROR:", err)
+			ctx.tgModel.databaseErrorResponse()
+			return showTagsEvent
 		}
 	}
 
-	return len(strings.Fields(txt)) <= 4
+	ctx.tgModel.showingTagsResponse(tags)
+	return showTagsEvent
 }
 
 type deletingStickerAction struct{}
 
 func (a *deletingStickerAction) Execute(eventCtx EventContext) EventType {
-	ctx := eventCtx.(*ProcessingStickerContext)
+	ctx := eventCtx.(*ActionContext)
 
-	msg := tgbotapi.NewMessage(ctx.upd.Message.Chat.ID, "Send me the sticker you want to delete.")
-	ctx.bot.Send(msg)
-
-	return sendToDeleteSticker
-}
-
-type sendingToDeleteStickerAction struct{}
-
-func (a *sendingToDeleteStickerAction) Execute(eventCtx EventContext) EventType {
-	ctx := eventCtx.(*ProcessingStickerContext)
-	userID := ctx.upd.Message.From.ID
-	sticker := ctx.upd.Message.Sticker
-
-	msg := tgbotapi.NewMessage(ctx.upd.Message.Chat.ID, "")
+	userID := ctx.tgModel.upd.Message.From.ID
+	sticker := ctx.tgModel.upd.Message.Sticker
 
 	if sticker == nil {
-		msg.Text = "Maaan... This is not a sticker. Try again or /cancel"
-		ctx.bot.Send(msg)
-		return sendToDeleteSticker
+		ctx.tgModel.notStickerResponse()
+		return deleteStickerEvent
 	}
 
-	msg.Text = "Nice! Sticker has been deleted."
-	if err := DeleteStickerPG(userID, sticker.FileUniqueID); err != nil {
-		log.Println("[Delete sticker postgres] ERROR:", err)
-		msg.Text = "Sorry, I can't delete your sticker. Probably it's DB problem. /cancel"
-		ctx.bot.Send(msg)
-		return Nop
+	if err := ctx.sticker.DeleteSticker(userID, sticker.FileUniqueID); err != nil {
+		switch {
+		case errors.Is(err, ErrRecordNotFound):
+			ctx.tgModel.notFoundResponse()
+			return deleteStickerEvent
+		default:
+			log.Println("[Delete sticker postgres] ERROR:", err)
+			ctx.tgModel.databaseErrorResponse()
+			return deleteStickerEvent
+		}
 	}
 
-	ctx.bot.Send(msg)
-	return Nop
-}
-
-type showingDescriptionAction struct{}
-
-func (a *showingDescriptionAction) Execute(eventCtx EventContext) EventType {
-	ctx := eventCtx.(*ProcessingStickerContext)
-
-	msg := tgbotapi.NewMessage(ctx.upd.Message.Chat.ID, "Send me the sticker whose description you want to see.")
-	ctx.bot.Send(msg)
-
-	return sendToShowDescription
-}
-
-type sendingToShowDescriptionAction struct{}
-
-func (a *sendingToShowDescriptionAction) Execute(eventCtx EventContext) EventType {
-	ctx := eventCtx.(*ProcessingStickerContext)
-	userID := ctx.upd.Message.From.ID
-	sticker := ctx.upd.Message.Sticker
-
-	msg := tgbotapi.NewMessage(ctx.upd.Message.Chat.ID, "")
-
-	if sticker == nil {
-		msg.Text = "Maaan... This is not a sticker. Try again or /cancel"
-		ctx.bot.Send(msg)
-		return sendToShowDescription
-	}
-
-	desc, err := GetStickerDescriptionPG(userID, sticker.FileUniqueID)
-	if err != nil {
-		log.Println("[Show description postgres] ERROR:", err)
-		msg.Text = "Sorry, I can't show your description. Probably it's DB problem. /cancel"
-		ctx.bot.Send(msg)
-		return Nop
-	}
-
-	if desc == "" {
-		msg.Text = "I know nothing about this sticker. Try again or /cancel"
-		ctx.bot.Send(msg)
-		return sendToShowDescription
-	}
-
-	msg.Text = fmt.Sprintf("Description of this sticker: %s", desc)
-	ctx.bot.Send(msg)
-	return Nop
+	ctx.tgModel.deletingStickerResponse()
+	return nop
 }

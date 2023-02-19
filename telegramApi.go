@@ -7,54 +7,121 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-func messageHandler(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
-	redis, err := GetStateRedis(upd.Message.From.UserName, upd.Message.From.ID)
-	if err != nil {
-		log.Println("[Get state redis] ERROR:", err)
-		return
-	}
+type TelegramModel struct {
+	bot *tgbotapi.BotAPI
+	upd *tgbotapi.Update
+}
 
-	switch upd.Message.Command() {
-	case "start":
-		ProcessSrartOperation(bot, upd)
-		return
-	case "help":
-		ProcessHelpOperation(bot, upd)
-		return
-	case "cancel":
-		ProcessCancelOpearation(bot, upd, redis)
-		return
-	}
+func (app *application) startBot() {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
 
-	if redis.State == Def {
-		switch upd.Message.Command() {
-		case "add":
-			go InitAddingSticker(bot, upd, redis)
-		case "delete":
-			go InitDeletingSticker(bot, upd, redis)
-		case "show":
-			go InitShowDescription(bot, upd, redis)
-		default:
-			go ProcessUnrecognizedCommand(bot, upd, redis)
+	updates := app.telegram.bot.GetUpdatesChan(u)
+
+	for update := range updates {
+		app.telegram.upd = &update
+		switch {
+		case update.Message != nil:
+			app.messageHandler(update.Message.Text)
+		case update.InlineQuery != nil:
+			app.inlineQueryHandler(update)
 		}
-	} else {
-		go ProcessFSM(bot, upd, redis)
 	}
 }
 
-func inlineQueryHandler(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
+func (app *application) messageHandler(message string) {
+	switch message {
+	case "/start":
+		app.startOperation()
+		return
+	case "/cancel":
+		app.cancelOperation()
+		return
+	case "/help":
+		app.telegram.helpOperationResponse()
+		return
+	}
+
+	actionContext := &ActionContext{
+		tgModel:    app.telegram,
+		sticker:    app.sticker,
+		user:       app.user,
+		memSticker: app.memSticker,
+	}
+
+	u := &User{
+		ID:    app.telegram.upd.Message.From.ID,
+		Name:  app.telegram.upd.Message.From.UserName,
+		State: "def",
+		Event: "nop",
+	}
+
+	err := app.user.GetByUser(u)
+	if err != nil {
+		log.Println("[DB] ERROR:", err)
+	}
+
+	err = app.fsm.SendEvent(EventType(u.Event), actionContext)
+	if err != nil {
+		log.Println("[FSM] ERROR:", err)
+	}
+
+	u.State = string(app.fsm.currentState)
+	u.Event = string(app.fsm.currentEvent)
+
+	err = app.user.Update(u)
+	if err != nil {
+		log.Println("[DB] ERROR:", err)
+	}
+}
+
+func (app *application) startOperation() {
+	u := User{
+		ID:    app.telegram.upd.Message.From.ID,
+		Name:  app.telegram.upd.Message.From.UserName,
+		State: "def",
+		Event: "nop",
+	}
+	err := app.user.Upsert(u)
+	if err != nil {
+		log.Println("[DB] ERROR:", err)
+	}
+	app.telegram.startOperationResponse()
+}
+
+func (app *application) cancelOperation() {
+	u := &User{
+		ID:   app.telegram.upd.Message.From.ID,
+		Name: app.telegram.upd.Message.From.UserName,
+	}
+	err := app.user.GetByUser(u)
+	if err != nil {
+		log.Println("[DB] ERROR:", err)
+	}
+	oldEvent := u.Event
+	u.State = "def"
+	u.Event = "nop"
+	err = app.user.Update(u)
+	if err != nil {
+		log.Println("[DB] ERROR:", err)
+	}
+	app.telegram.cancelOperationResponse(EventType(oldEvent))
+}
+
+func (app *application) inlineQueryHandler(upd tgbotapi.Update) {
 	userID := upd.InlineQuery.From.ID
 	query := upd.InlineQuery.Query
 	queryOffset, _ := strconv.Atoi(upd.InlineQuery.Offset)
 
-	rows, err := GetStickerPG(userID, query, queryOffset)
+	stickers, err := app.sticker.GetSticker(userID, query, queryOffset)
 	if err != nil {
 		log.Println("[Get Stickers] ERROR:", err)
 	}
 
 	var results []any
-	for _, row := range rows {
-		sticker := tgbotapi.NewInlineQueryResultCachedSticker(row.stickerID[:64], row.stickerID, upd.InlineQuery.Query)
+
+	for _, s := range stickers {
+		sticker := tgbotapi.NewInlineQueryResultCachedSticker(s.id[:64], s.id, upd.InlineQuery.Query)
 		results = append(results, sticker)
 	}
 
@@ -69,29 +136,7 @@ func inlineQueryHandler(bot tgbotapi.BotAPI, upd tgbotapi.Update) {
 		inlineConf.NextOffset = strconv.Itoa(queryOffset + 50)
 	}
 
-	if _, err := bot.Request(inlineConf); err != nil {
+	if _, err := app.telegram.bot.Request(inlineConf); err != nil {
 		log.Println("[Inline request] ERROR:", err)
-	}
-}
-
-func startBot(token string) {
-	bot, err := tgbotapi.NewBotAPI(token)
-	if err != nil {
-		log.Fatalln("[Telegram сonnection] FATAL:", err)
-	}
-	log.Printf("Authorized on account %s", bot.Self.UserName)
-
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-
-	updates := bot.GetUpdatesChan(u)
-
-	for update := range updates {
-		switch {
-		case update.Message != nil:
-			go messageHandler(*bot, update)
-		case update.InlineQuery != nil:
-			go inlineQueryHandler(*bot, update)
-		}
 	}
 }

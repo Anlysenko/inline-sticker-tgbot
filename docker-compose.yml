@@ -1,42 +1,42 @@
-version: "3.9"
 services:
   app:
-    container_name: "inline-sticker-app"
+    container_name: inline-sticker-app
     restart: always
     build: .
     depends_on:
-      - redis
       - postgres
     environment:
-      PG_HOST: 'postgres'
-      PG_USER: 'stick'
-      PG_PASS: '<POSTGRES PASSWORD>'
-      PG_DBNAME: 'stickerdb'
-      R_ADDR: 'redis:6379'
-      R_PASS: '<REDIS PASSWORD>'
-      TG_TOKEN: '<TELEGRAM BOT TOKEN>'
-  redis:
-    image: "redis:alpine"
-    restart: always
-    ports:
-      - '6379:6379'
-    command: ["redis-server", "--requirepass", "<REDIS PASSWORD>"]
-    volumes:
-      - redis:/data
+      PG_DSN: ${PG_DSN}
+      PG_MaxOpenConns: 25
+      PG_MaxIdleConns: 25
+      PG_MaxIdleTime: '15m'
+      TG_TOKEN: ${TG_TOKEN}
   postgres:
-    image: "postgres:alpine"
-    restart: always
+    image: postgres:15-alpine
+    command: >
+      -c max_connections=50
+      -c shared_buffers=512MB
+      -c effective_cache_size=1536MB
+      -c maintenance_work_mem=128MB
+      -c checkpoint_timeout=10min
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=5242kB
+      -c max_wal_size=2GB
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: 'stick'
-      POSTGRES_PASSWORD: '<POSTGRES PASSWORD>'
-      POSTGRES_DB: 'stickerdb'
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - '5432:5432'
     volumes:
       - postgres:/var/lib/postgresql/data
+      - ./db.sql:/docker-entrypoint-initdb.d/db.sql
 
 volumes:
-  redis:
-    driver: local
   postgres:
     driver: local

@@ -2,158 +2,183 @@ package main
 
 import (
 	"database/sql"
-	"fmt"
-	"log"
-	"os"
-	"strings"
+	"errors"
 
 	_ "github.com/lib/pq"
 )
 
-type stickers struct {
-	stickerID          string
-	stickerDescription string
+var ErrRecordNotFound = errors.New("record not found")
+
+type Sticker struct {
+	uniqueID string
+	id       string
+	tags     string
+	userID   int64
 }
 
-func GetStickerDescriptionPG(userID int64, stickerUniqueID string) (string, error) {
-	db, err := sql.Open("postgres", dbInfo)
-	if err != nil {
-		return "", err
-	}
-	defer db.Close()
+type StickerModel struct {
+	DB *sql.DB
+}
 
-	q := `SELECT description from stickers 
-	WHERE user_id = $1 AND sticker_unique_id = $2`
+func (s StickerModel) GetStickerTags(userID int64, stickerUniqueID string) (string, error) {
+	q := `
+		SELECT tags FROM stickers 
+		WHERE user_id = $1 AND unique_id = $2`
 
-	description := stickers{}
-	err = db.QueryRow(q, userID, stickerUniqueID).Scan(&description.stickerDescription)
+	var sticker Sticker
+	err := s.DB.QueryRow(q, userID, stickerUniqueID).Scan(&sticker.tags)
 
 	switch {
-	case err == sql.ErrNoRows:
-		return "", nil
+	case errors.Is(err, sql.ErrNoRows):
+		return "", ErrRecordNotFound
 	case err != nil:
 		return "", err
 	default:
-		return description.stickerDescription, nil
+		return sticker.tags, nil
 	}
 }
 
-func DeleteStickerPG(userID int64, col string) error {
-	db, err := sql.Open("postgres", dbInfo)
+func (s StickerModel) DeleteSticker(userID int64, uid string) error {
+	q := `
+		DELETE FROM stickers
+		WHERE user_id = $1 AND unique_id = $2`
+
+	result, err := s.DB.Exec(q, userID, uid)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
 
-	q := `DELETE from stickers
-	WHERE user_id = $1 AND sticker_unique_id = $2`
-
-	if col == "~" {
-		q = `DELETE from stickers
-	WHERE user_id = $1 AND description = $2`
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
 	}
 
-	if _, err := db.Exec(q, userID, col); err != nil {
+	if rowsAffected == 0 {
+		return ErrRecordNotFound
+	}
+
+	return nil
+}
+
+func (s StickerModel) UpdateTags(userID int64, tags string) error {
+	q := `
+		UPDATE stickers
+		SET tags = $1
+		WHERE user_id = $2`
+
+	if _, err := s.DB.Exec(q, tags, userID); err != nil {
 		return err
 	}
 	return nil
 }
 
-func UpdateDescriptionPG(userID int64, description string) error {
-	db, err := sql.Open("postgres", dbInfo)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+func (s StickerModel) InsertSticker(stick *Sticker) error {
+	q := `
+		INSERT INTO stickers (unique_id, id, tags, user_id)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT(unique_id, user_id)
+		DO UPDATE SET tags = $3`
 
-	q := `UPDATE stickers
-	SET description = $2
-	WHERE user_id = $1 AND description = '~'`
+	args := []any{stick.uniqueID, stick.id, stick.tags, stick.userID}
 
-	if _, err = db.Exec(q, userID, description); err != nil {
-		return err
-	}
-	return nil
-}
-
-func InsertStickerPG(userID int64, stickerID string, stickerUniqueID string, description string) error {
-	db, err := sql.Open("postgres", dbInfo)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	q := `INSERT INTO stickers (user_id, sticker_id, sticker_unique_id, description)
-	VALUES ($1, $2, $3, $4)
-	ON CONFLICT(user_id, sticker_unique_id)
-	DO UPDATE SET description = $4`
-
-	if _, err = db.Exec(q, userID, stickerID, stickerUniqueID, description); err != nil {
+	if _, err := s.DB.Exec(q, args...); err != nil {
 		return err
 	}
 	return nil
 }
 
-func GetStickerPG(userID int64, query string, queryOffset int) ([]stickers, error) {
-	var q string
-	switch {
-	case query == "":
-		q = `SELECT sticker_id from stickers
-		WHERE user_id = $1 OFFSET $2 LIMIT 50`
-		return processQueryStickersPG(q, userID, queryOffset)
-	case strings.HasPrefix(query, "//"):
-		q = `SELECT sticker_id from stickers
-		WHERE description LIKE '%' || $1 || '%'
-		OFFSET $2 LIMIT 50`
-		return processQueryStickersPG(q, query[2:], queryOffset)
-	default:
-		q = `SELECT sticker_id from stickers
-		WHERE user_id = $1 AND description LIKE '%' || $2 || '%'
-		OFFSET $3 LIMIT 50`
-		return processQueryStickersPG(q, userID, query, queryOffset)
-	}
-}
+func (s StickerModel) GetSticker(userID int64, query string, queryOffset int) ([]*Sticker, error) {
+	q := `
+		SELECT id FROM stickers
+		WHERE 
+			CASE
+				WHEN $2 = '' THEN user_id = $1
+				WHEN $2 LIKE '//%' AND length($2) = 2 THEN TRUE
+				WHEN $2 LIKE '//%' THEN to_tsvector('simple', tags) @@
+					plainto_tsquery('simple', substr($2, 3))
+				ELSE to_tsvector('simple', tags) @@
+					plainto_tsquery('simple', $2) AND user_id = $1
+			END
+		ORDER BY created_at DESC
+		LIMIT 50 OFFSET $3`
 
-func processQueryStickersPG(q string, args ...any) ([]stickers, error) {
-	db, err := sql.Open("postgres", dbInfo)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	rows, err := db.Query(q, args...)
+	rows, err := s.DB.Query(q, userID, query, queryOffset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	sticks := []stickers{}
+	stickers := []*Sticker{}
+
 	for rows.Next() {
-		s := stickers{}
-		err := rows.Scan(&s.stickerID)
+		var s Sticker
+
+		err := rows.Scan(&s.id)
 		if err != nil {
-			log.Println("[Scan]", err)
-			continue
+			return nil, err
 		}
-		sticks = append(sticks, s)
+
+		stickers = append(stickers, &s)
 	}
-	return sticks, nil
+
+	return stickers, nil
 }
 
-func CreateTablePG() error {
-	s, err := os.ReadFile("db.sql")
+type User struct {
+	ID    int64
+	Name  string
+	State string
+	Event string
+}
+
+type UserModel struct {
+	DB *sql.DB
+}
+
+func (u UserModel) GetByUser(user *User) error {
+	q := `
+		SELECT state, event
+		FROM users 
+		WHERE id = $1`
+
+	err := u.DB.QueryRow(q, user.ID).Scan(&user.State, &user.Event)
+
 	if err != nil {
-		return err
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrRecordNotFound
+		default:
+			return err
+		}
 	}
 
-	fmt.Println(dbInfo)
-	db, err := sql.Open("postgres", dbInfo)
-	if err != nil {
+	return nil
+}
+
+func (u UserModel) Upsert(user User) error {
+	q := `
+		INSERT INTO users (id, name, state, event)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (id)
+		DO NOTHING`
+
+	args := []any{user.ID, user.Name, user.State, user.Event}
+
+	if _, err := u.DB.Exec(q, args...); err != nil {
 		return err
 	}
-	defer db.Close()
+	return nil
+}
 
-	if _, err = db.Exec(string(s)); err != nil {
+func (u UserModel) Update(user *User) error {
+	q := `
+		UPDATE users
+		SET state = $1, event = $2
+		WHERE id = $3`
+
+	args := []any{user.State, user.Event, user.ID}
+
+	if _, err := u.DB.Exec(q, args...); err != nil {
 		return err
 	}
 	return nil

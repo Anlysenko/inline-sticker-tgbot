@@ -1,44 +1,107 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"database/sql"
 	"log"
+	"time"
 
-	"github.com/caarlos0/env"
-	"github.com/go-redis/redis/v9"
+	"github.com/caarlos0/env/v7"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	_ "github.com/lib/pq"
 )
 
-var pgCfg postgresConfig
-var rCfg redisConfig
-var tgCfg telegramConfig
+type config struct {
+	pgdb struct {
+		DSN          string `env:"PG_DSN,required"`
+		MaxOpenConns int    `env:"PG_MaxOpenConns,required"`
+		MaxIdleConns int    `env:"PG_MaxIdleConns,required"`
+		MaxIdleTime  string `env:"PG_MaxIdleTime,required"`
+	}
 
-var dbInfo string
+	telegram struct {
+		Token string `env:"TG_TOKEN,required"`
+	}
+}
 
-var rdb *redis.Client
+type application struct {
+	sticker    StickerModel
+	user       UserModel
+	telegram   *TelegramModel
+	fsm        *StateMachine
+	memSticker *MemSticker
+}
 
 func main() {
-	if err := env.Parse(&pgCfg); err != nil {
+	var cfg config
+
+	if err := env.Parse(&cfg.pgdb); err != nil {
 		log.Fatalln("[Postgres env config] FATAL:", err)
 	}
-	dbInfo = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		pgCfg.Host, pgCfg.Port, pgCfg.User, pgCfg.Pass, pgCfg.DBName, pgCfg.SSLMode)
 
-	if err := env.Parse(&rCfg); err != nil {
-		log.Fatalln("[Redis env config] FATAL:", err)
+	db, err := openDB(cfg)
+	if err != nil {
+		log.Fatalln("[Open DB] FATAL:", err)
 	}
-	rdb = redis.NewClient(&redis.Options{
-		Addr:     rCfg.Addr,
-		Password: rCfg.Password,
-		DB:       rCfg.DB,
-	})
+	defer db.Close()
 
-	if err := env.Parse(&tgCfg); err != nil {
+	if err := env.Parse(&cfg.telegram); err != nil {
 		log.Fatalln("[Telegram env config] FATAL:", err)
 	}
 
-	if err := CreateTablePG(); err != nil {
-		log.Fatalln("[Create table] FATAL:", err)
+	tg, err := initTelegramBot(cfg.telegram.Token)
+	if err != nil {
+		log.Fatalln("[Telegram connection] FATAL:", err)
 	}
 
-	startBot(tgCfg.TelegramToken)
+	app := &application{
+		sticker:    StickerModel{DB: db},
+		user:       UserModel{DB: db},
+		telegram:   tg,
+		fsm:        newStickerFSM(),
+		memSticker: newMemSticker(),
+	}
+
+	go app.memSticker.backgroundCleanup()
+
+	app.startBot()
+}
+
+func openDB(cfg config) (*sql.DB, error) {
+	db, err := sql.Open("postgres", cfg.pgdb.DSN)
+	if err != nil {
+		return nil, err
+	}
+
+	db.SetMaxOpenConns(cfg.pgdb.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.pgdb.MaxIdleConns)
+
+	duration, err := time.ParseDuration(cfg.pgdb.MaxIdleTime)
+	if err != nil {
+		return nil, err
+	}
+	db.SetConnMaxIdleTime(duration)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = db.PingContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func initTelegramBot(token string) (*TelegramModel, error) {
+	bot, err := tgbotapi.NewBotAPI(token)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Authorized on account %s", bot.Self.UserName)
+
+	tg := &TelegramModel{bot: bot}
+
+	return tg, nil
 }
